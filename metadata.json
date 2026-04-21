@@ -1,0 +1,6 @@
+{
+  "name": "EchoScribe",
+  "description": "AI-powered meeting intelligence. Upload audio to generate summaries, action items, and follow-up emails instantly.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
