@@ -59,10 +59,8 @@ export default function App() {
 
   const extractJson = (text: string) => {
     try {
-      // Try direct parse first
       return JSON.parse(text);
     } catch {
-      // Try to extract from markdown blocks
       const match = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
       if (match && match[1]) {
         try {
@@ -103,11 +101,17 @@ export default function App() {
     try {
       // 1. Validate API Key
       const apiKey = process.env.GEMINI_API_KEY;
+      
+      // On Vercel, if the build-time env var is missing, process.env.GEMINI_API_KEY 
+      // might be literal undefined or the string "undefined" after Vite's define replacement.
       if (!apiKey || apiKey === "undefined") {
-        throw new Error("Gemini API key is not configured. Please add it to the Settings menu.");
+        throw new Error(
+          "Gemini API key is not configured in this deployment. " + 
+          "On Vercel, please add GEMINI_API_KEY to your Project Settings and redeploy."
+        );
       }
 
-      // 2. Check file size (Note: Large files >30MB may still hit proxy limits)
+      // 2. Check file size
       if (file.size > 100 * 1024 * 1024) {
         throw new Error("Audio file is too large (>100MB). Current capacity is 100MB.");
       }
@@ -119,7 +123,7 @@ export default function App() {
       const ai = new GoogleGenAI({ apiKey });
       
       const response = await ai.models.generateContent({
-        model: "gemini-flash-latest", // Using latest stable flash for audio robustness
+        model: "gemini-flash-latest",
         contents: [
           {
             parts: [
