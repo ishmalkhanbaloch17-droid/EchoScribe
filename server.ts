@@ -19,38 +19,31 @@ async function startServer() {
                    dbUrl === 'base' || 
                    dbUrl.includes('//base') || 
                    dbUrl.includes('hostname') ||
-                   dbUrl.includes('your-db-url');
+                   dbUrl.includes('your-db-url') ||
+                   dbUrl.includes('example.com');
   
   if (dbUrl && !isPlaceholder) {
     try {
       pool = new Pool({ 
         connectionString: dbUrl,
-        connectionTimeoutMillis: 5000 // Short timeout to fail fast
+        connectionTimeoutMillis: 3000 // Even shorter for better startup speed
       });
-      // Test the pool immediately to catch host errors early
       pool.on('error', (err: any) => {
-        console.error("UNEXPECTED DATABASE POOL ERROR:", err.message);
         dbError = err.message;
       });
     } catch (e: any) {
-      console.error("FAILED TO INSTANTIATE DATABASE POOL:", e.message);
       dbError = e.message;
       pool = null;
     }
   } else if (process.env.POSTGRES_URL) {
-    console.info("Database: Running in memory-only mode (POSTGRES_URL is not configured).");
-    dbError = "Database not configured";
+    dbError = "Database not configured (using placeholders)";
   }
 
   // Database Initialization Logic
   if (pool) {
     try {
-      console.log("Connecting to database...");
       const client = await pool.connect();
       try {
-        console.log("Database connection successful.");
-        
-        // Create standard scribe_final_records table
         await client.query(`
           CREATE TABLE IF NOT EXISTS scribe_final_records (
             id TEXT PRIMARY KEY,
@@ -63,27 +56,25 @@ async function startServer() {
             created_at TIMESTAMP DEFAULT NOW() NOT NULL
           );
         `);
-        console.log("scribe_final_records table initialized.");
       } finally {
         client.release();
       }
     } catch (dbInitErr: any) {
-      // Quietly handle connection failures during init to avoid noisy logs when config is invalid
-      if (dbInitErr.message.includes('getaddrinfo EAI_AGAIN') || dbInitErr.message.includes('ENOTFOUND')) {
-        console.info("Database: Connection failed (Hostname unresolved). History will not persist this session.");
-      } else {
-        console.warn("Database: Connection failed during initialization.", dbInitErr.message);
-      }
+      // Intentionally silent - fallback to memoryHistory is handled in endpoints
       pool = null;
       dbError = dbInitErr.message;
     }
   }
 
-  app.use(express.json());
+  app.use(express.json({ limit: '110mb' }));
+  app.use(express.urlencoded({ limit: '110mb', extended: true }));
+
+  // In-memory fallback storage
+  let memoryHistory: any[] = [];
 
   // API Route: Get Meeting History
   app.get("/api/meetings", async (_req, res) => {
-    if (!pool) return res.json({ error: dbError || "Database not configured", data: [] });
+    if (!pool) return res.json({ data: memoryHistory });
     try {
       const client = await pool.connect();
       try {
@@ -94,7 +85,7 @@ async function startServer() {
       }
     } catch (error: any) {
       console.error("Fetch meetings error:", error);
-      res.json({ error: error.message, data: [] });
+      res.json({ data: memoryHistory, error: error.message });
     }
   });
 
@@ -103,8 +94,24 @@ async function startServer() {
     try {
       const { summary, actionItems, followUpEmail, template, originalName } = req.body;
       const userId = "public-user";
+      const meetingId = crypto.randomUUID();
+      const createdAt = new Date().toISOString();
+
+      const newMeeting = {
+        id: meetingId,
+        user_id: userId,
+        summary,
+        action_items: actionItems,
+        follow_up_email: followUpEmail,
+        metadata: { template, originalName },
+        created_at: createdAt
+      };
+
+      // Add to memory fallback
+      memoryHistory = [newMeeting, ...memoryHistory].slice(0, 10);
 
       // Save to database if pool is provided
+      let dbSaved = false;
       let dbSaveError = null;
       if (pool) {
         try {
@@ -112,19 +119,20 @@ async function startServer() {
           try {
             await client.query(
               'INSERT INTO scribe_final_records (id, user_id, summary, action_items, follow_up_email, metadata) VALUES ($1, $2, $3, $4, $5, $6)',
-              [crypto.randomUUID(), userId, summary, JSON.stringify(actionItems), followUpEmail, JSON.stringify({ template, originalName })]
+              [meetingId, userId, summary, JSON.stringify(actionItems), followUpEmail, JSON.stringify({ template, originalName })]
             );
-            console.log("Meeting saved using raw SQL successfully.");
+            dbSaved = true;
+            console.log("Meeting saved to database.");
           } finally {
             client.release();
           }
         } catch (dbErr: any) {
-          console.error("RAW DB SAVE ERROR:", dbErr.message);
+          console.error("DB SAVE ERROR:", dbErr.message);
           dbSaveError = dbErr.message;
         }
       }
 
-      res.json({ status: "success", dbError: dbSaveError });
+      res.json({ status: "success", dbSaved, dbError: dbSaveError, meeting: newMeeting });
     } catch (error: any) {
       console.error("Save error:", error);
       res.status(500).json({ error: error.message || "Failed to save meeting" });
